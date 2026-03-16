@@ -1,0 +1,16 @@
+{
+  "name": "@farmville/client",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@farmville/shared": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vite": "^6.4.1"
+  }
+}
