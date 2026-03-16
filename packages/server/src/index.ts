@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { execSync } from 'child_process';
 import http from 'http';
 import express from 'express';
 import cors from 'cors';
@@ -32,6 +33,7 @@ async function start(): Promise<void> {
     });
   });
 
+  execSync('npx prisma migrate deploy --schema=packages/server/prisma/schema.prisma', { stdio: 'inherit' });
   await prisma.$connect();
   console.log('[db] Connected');
 }
