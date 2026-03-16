@@ -25,12 +25,15 @@ const httpServer = http.createServer(app);
 initSocket(httpServer, CLIENT_URL);
 
 async function start(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    httpServer.listen(PORT, () => {
+      console.log(`Farmville server running on http://localhost:${PORT}`);
+      resolve();
+    });
+  });
+
   await prisma.$connect();
   console.log('[db] Connected');
-
-  httpServer.listen(PORT, () => {
-    console.log(`Farmville server running on http://localhost:${PORT}`);
-  });
 }
 
 start().catch((err) => {
