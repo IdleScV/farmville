@@ -1,5 +1,6 @@
 # ── Builder ────────────────────────────────────────────────────────────────
 FROM node:20-alpine AS builder
+RUN apk add --no-cache openssl
 WORKDIR /app
 
 # Copy package files for all workspaces
@@ -22,6 +23,7 @@ RUN npm run build -w @farmville/shared && npm run build -w @farmville/server
 
 # ── Runner ─────────────────────────────────────────────────────────────────
 FROM node:20-alpine
+RUN apk add --no-cache openssl
 WORKDIR /app
 ENV NODE_ENV=production
 
