@@ -1,9 +1,4 @@
-import { renderAuth } from './auth';
-import { renderGame } from './game';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const API = ((import.meta as any).env as Record<string, string> | undefined)?.VITE_API_URL ?? 'http://localhost:3001';
-export const apiUrl = API;
+const API = (import.meta as unknown as { env: Record<string, string> }).env.VITE_API_URL ?? 'http://localhost:3001';
 
 export function getToken(): string | null {
   return localStorage.getItem('fv_token');
@@ -19,7 +14,7 @@ export function clearToken(): void {
 
 export async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const token = getToken();
-  const res = await fetch(`${apiUrl}${path}`, {
+  const res = await fetch(`${API}${path}`, {
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -31,13 +26,4 @@ export async function apiFetch<T>(path: string, options?: RequestInit): Promise<
   return data as T;
 }
 
-function boot(): void {
-  const app = document.getElementById('app')!;
-  if (getToken()) {
-    renderGame(app);
-  } else {
-    renderAuth(app);
-  }
-}
-
-boot();
+export { API };

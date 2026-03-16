@@ -13,7 +13,10 @@
     "build:client": "npm run build -w @farmville/shared && npm run build -w @farmville/client",
     "typecheck": "npm run typecheck -w @farmville/shared && npm run typecheck -w @farmville/client && npm run typecheck -w @farmville/server",
     "db:up": "docker compose up -d",
-    "db:down": "docker compose down"
+    "db:down": "docker compose down",
+    "db:push": "npm run db:push -w @farmville/server",
+    "db:reset": "npm run db:reset -w @farmville/server",
+    "generate": "npm run generate -w @farmville/server"
   },
   "devDependencies": {
     "typescript": "^5.4.0"

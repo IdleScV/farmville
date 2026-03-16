@@ -10,27 +10,35 @@ export type PlotState = 'empty' | 'growing' | 'ready';
 
 export interface Plot {
   id: string;
-  user_id: string;
+  userId: string;
   x: number;
   y: number;
-  state: PlotState;
-  crop_type: string | null;
-  planted_at: string | null; // ISO timestamp
+  unlocked: boolean;
+  cropType: string | null;
+  plantedAt: string | null; // ISO timestamp
+  harvestAt: string | null; // ISO timestamp
+  fertBoosted: boolean;
 }
 
-export interface CropType {
-  id: string;
-  name: string;
-  growth_seconds: number;
-  seed_cost: number;
-  harvest_yield: number;
-  xp_yield: number;
-  min_level: number;
-  emoji: string;
+export interface ToolBelt {
+  water: number;
+  fertilizer: number;
 }
 
 export interface FarmState {
   user: User;
   plots: Plot[];
-  cropTypes: CropType[];
+  toolBelt: ToolBelt;
+}
+
+export interface CatchUpResult {
+  harvested: number;
+  coinsEarned: number;
+  xpEarned: number;
+  streakBonus: boolean;
+}
+
+export interface PestEvent {
+  plotId: string;
+  deadline: number; // unix timestamp ms
 }

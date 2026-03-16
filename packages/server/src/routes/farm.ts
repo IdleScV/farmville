@@ -1,35 +1,31 @@
 import { Router, Response } from 'express';
-import { db } from '../db';
+import { prisma } from '../db';
 import { requireAuth, AuthRequest } from '../middleware/auth';
+import { runCatchUp } from '../game/catchup';
+import { emitToUser } from '../socket';
+import { CROP_MAP, xpForNextLevel, FERT_YIELD_MULT, PEST_WINDOW_MS } from '@farmville/shared';
 
 export const farmRouter = Router();
 farmRouter.use(requireAuth);
 
-// GET /farm — full farm state
+// GET /farm — full farm state + offline catch-up
 farmRouter.get('/', async (req, res: Response): Promise<void> => {
   const userId = (req as AuthRequest).userId;
   try {
-    const [userResult, plotsResult, cropsResult] = await Promise.all([
-      db.query(`SELECT id, username, coins, level, xp FROM users WHERE id = $1`, [userId]),
-      db.query(`SELECT * FROM plots WHERE user_id = $1 ORDER BY y, x`, [userId]),
-      db.query(`SELECT * FROM crop_types ORDER BY min_level, seed_cost`),
+    const catchUp = await runCatchUp(userId);
+
+    const [user, plots] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, username: true, coins: true, level: true, xp: true, toolBelt: true },
+      }),
+      prisma.plot.findMany({ where: { userId }, orderBy: [{ y: 'asc' }, { x: 'asc' }] }),
     ]);
 
-    // Resolve 'growing' → 'ready' based on elapsed time (server is authoritative)
-    const now = Date.now();
-    const cropMap = new Map(cropsResult.rows.map((c) => [c.id, c]));
-    const plots = plotsResult.rows.map((plot) => {
-      if (plot.state === 'growing' && plot.planted_at && plot.crop_type) {
-        const crop = cropMap.get(plot.crop_type);
-        if (crop) {
-          const elapsed = (now - new Date(plot.planted_at).getTime()) / 1000;
-          if (elapsed >= crop.growth_seconds) return { ...plot, state: 'ready' };
-        }
-      }
-      return plot;
-    });
+    if (!user) { res.status(404).json({ error: 'User not found' }); return; }
 
-    res.json({ user: userResult.rows[0], plots, cropTypes: cropsResult.rows });
+    const { toolBelt, ...restUser } = user;
+    res.json({ user: restUser, plots, toolBelt, catchUp });
   } catch (err) {
     console.error('GET /farm error:', err);
     res.status(500).json({ error: 'Server error' });
@@ -39,38 +35,58 @@ farmRouter.get('/', async (req, res: Response): Promise<void> => {
 // POST /farm/plant
 farmRouter.post('/plant', async (req, res: Response): Promise<void> => {
   const userId = (req as AuthRequest).userId;
-  const { plotId, cropTypeId } = req.body ?? {};
+  const { plotId, cropType } = req.body ?? {};
 
-  if (!plotId || !cropTypeId) {
-    res.status(400).json({ error: 'plotId and cropTypeId required' });
+  if (!plotId || !cropType) {
+    res.status(400).json({ error: 'plotId and cropType required' });
     return;
   }
 
+  const cropDef = CROP_MAP.get(cropType);
+  if (!cropDef) { res.status(400).json({ error: 'Unknown crop type' }); return; }
+
   try {
-    const [plotResult, cropResult, userResult] = await Promise.all([
-      db.query(`SELECT * FROM plots WHERE id = $1 AND user_id = $2`, [plotId, userId]),
-      db.query(`SELECT * FROM crop_types WHERE id = $1`, [cropTypeId]),
-      db.query(`SELECT coins, level FROM users WHERE id = $1`, [userId]),
+    const [plot, user] = await Promise.all([
+      prisma.plot.findFirst({ where: { id: plotId, userId } }),
+      prisma.user.findUnique({
+        where: { id: userId },
+        select: { coins: true, level: true, toolBelt: true },
+      }),
     ]);
 
-    const plot = plotResult.rows[0];
-    const crop = cropResult.rows[0];
-    const user = userResult.rows[0];
+    if (!plot)              { res.status(404).json({ error: 'Plot not found' }); return; }
+    if (!plot.unlocked)     { res.status(400).json({ error: 'Plot is locked' }); return; }
+    if (plot.cropType)      { res.status(400).json({ error: 'Plot already in use' }); return; }
+    if (!user)              { res.status(404).json({ error: 'User not found' }); return; }
+    if (user.coins < cropDef.seedCost) { res.status(400).json({ error: 'Not enough coins' }); return; }
+    if (user.level < cropDef.minLevel) { res.status(400).json({ error: `Requires level ${cropDef.minLevel}` }); return; }
 
-    if (!plot)                      { res.status(404).json({ error: 'Plot not found' }); return; }
-    if (!crop)                      { res.status(404).json({ error: 'Unknown crop type' }); return; }
-    if (plot.state !== 'empty')     { res.status(400).json({ error: 'Plot is not empty' }); return; }
-    if (user.coins < crop.seed_cost){ res.status(400).json({ error: 'Not enough coins' }); return; }
-    if (user.level < crop.min_level){ res.status(400).json({ error: `Requires level ${crop.min_level}` }); return; }
+    const toolBelt = user.toolBelt as { water: number; fertilizer: number };
+    const useWater = toolBelt.water > 0; // auto-use water if available (can be made explicit)
 
-    await db.query(`UPDATE users SET coins = coins - $1 WHERE id = $2`, [crop.seed_cost, userId]);
-    const updated = await db.query(
-      `UPDATE plots SET state = 'growing', crop_type = $1, planted_at = NOW()
-       WHERE id = $2 RETURNING *`,
-      [cropTypeId, plotId],
-    );
+    const growMs = useWater ? Math.floor(cropDef.growMs * 0.85) : cropDef.growMs;
+    const now = new Date();
+    const harvestAt = new Date(now.getTime() + growMs);
 
-    res.json({ plot: updated.rows[0], coins: user.coins - crop.seed_cost });
+    const [updatedPlot, updatedUser] = await prisma.$transaction([
+      prisma.plot.update({
+        where: { id: plotId },
+        data: { cropType, plantedAt: now, harvestAt },
+      }),
+      prisma.user.update({
+        where: { id: userId },
+        data: {
+          coins: { decrement: cropDef.seedCost },
+          toolBelt: useWater
+            ? { ...toolBelt, water: toolBelt.water - 1 }
+            : toolBelt,
+        },
+        select: { id: true, username: true, coins: true, level: true, xp: true, toolBelt: true },
+      }),
+    ]);
+
+    const { toolBelt: tb, ...restUser } = updatedUser;
+    res.json({ plot: updatedPlot, user: restUser, toolBelt: tb });
   } catch (err) {
     console.error('POST /farm/plant error:', err);
     res.status(500).json({ error: 'Server error' });
@@ -85,56 +101,87 @@ farmRouter.post('/harvest', async (req, res: Response): Promise<void> => {
   if (!plotId) { res.status(400).json({ error: 'plotId required' }); return; }
 
   try {
-    const plotResult = await db.query(
-      `SELECT p.*, c.growth_seconds, c.harvest_yield, c.xp_yield
-       FROM plots p
-       JOIN crop_types c ON p.crop_type = c.id
-       WHERE p.id = $1 AND p.user_id = $2`,
-      [plotId, userId],
-    );
-    const plot = plotResult.rows[0];
-    if (!plot) { res.status(404).json({ error: 'Plot not found' }); return; }
-
-    const elapsed = (Date.now() - new Date(plot.planted_at).getTime()) / 1000;
-    if (elapsed < plot.growth_seconds) {
-      res.status(400).json({ error: 'Crop is not ready yet' });
-      return;
+    const plot = await prisma.plot.findFirst({ where: { id: plotId, userId } });
+    if (!plot)         { res.status(404).json({ error: 'Plot not found' }); return; }
+    if (!plot.cropType){ res.status(400).json({ error: 'Nothing planted here' }); return; }
+    if (!plot.harvestAt || new Date() < plot.harvestAt) {
+      res.status(400).json({ error: 'Crop is not ready yet' }); return;
     }
 
-    const [clearedPlot, userResult] = await Promise.all([
-      db.query(
-        `UPDATE plots SET state = 'empty', crop_type = NULL, planted_at = NULL
-         WHERE id = $1 RETURNING *`,
-        [plotId],
-      ),
-      db.query(
-        `UPDATE users SET coins = coins + $1, xp = xp + $2 WHERE id = $3
-         RETURNING coins, xp, level`,
-        [plot.harvest_yield, plot.xp_yield, userId],
-      ),
+    const cropDef = CROP_MAP.get(plot.cropType);
+    if (!cropDef) { res.status(400).json({ error: 'Unknown crop' }); return; }
+
+    const yieldAmt = plot.fertBoosted
+      ? Math.floor(cropDef.harvestYield * FERT_YIELD_MULT)
+      : cropDef.harvestYield;
+
+    const [clearedPlot, rawUser] = await prisma.$transaction([
+      prisma.plot.update({
+        where: { id: plotId },
+        data: { cropType: null, plantedAt: null, harvestAt: null, fertBoosted: false },
+      }),
+      prisma.user.update({
+        where: { id: userId },
+        data: { coins: { increment: yieldAmt }, xp: { increment: cropDef.xp } },
+        select: { id: true, username: true, coins: true, level: true, xp: true },
+      }),
     ]);
 
-    const user = userResult.rows[0];
-
-    // Level up: threshold is level * 100 XP
-    const xpThreshold = user.level * 100;
+    // Level-up check
+    let { level, xp } = rawUser;
     let leveledUp = false;
-    let newLevel = user.level;
-    if (user.xp >= xpThreshold) {
-      newLevel = user.level + 1;
-      await db.query(`UPDATE users SET level = $1, xp = xp - $2 WHERE id = $3`, [newLevel, xpThreshold, userId]);
+    while (xp >= xpForNextLevel(level)) {
+      xp -= xpForNextLevel(level);
+      level += 1;
       leveledUp = true;
     }
+    const user = leveledUp
+      ? await prisma.user.update({ where: { id: userId }, data: { level, xp }, select: { id: true, username: true, coins: true, level: true, xp: true } })
+      : rawUser;
 
-    res.json({
-      plot: clearedPlot.rows[0],
-      coins: user.coins,
-      xp: user.xp,
-      leveledUp,
-      ...(leveledUp ? { newLevel } : {}),
-    });
+    // 1-in-5 chance of pest event
+    const pestEvent = Math.random() < 0.2;
+    if (pestEvent) {
+      // Pick a random growing plot to be affected
+      const growingPlots = await prisma.plot.findMany({
+        where: { userId, cropType: { not: null }, harvestAt: { gt: new Date() } },
+        take: 5,
+      });
+      if (growingPlots.length > 0) {
+        const target = growingPlots[Math.floor(Math.random() * growingPlots.length)];
+        const deadline = Date.now() + PEST_WINDOW_MS;
+        emitToUser(userId, 'pest:event', { plotId: target.id, deadline });
+
+        // Auto-destroy after window expires if not defended
+        setTimeout(async () => {
+          await prisma.plot.update({
+            where: { id: target.id },
+            data: { cropType: null, plantedAt: null, harvestAt: null },
+          }).catch(() => {});
+        }, PEST_WINDOW_MS + 500);
+      }
+    }
+
+    res.json({ plot: clearedPlot, user, pestEvent, leveledUp, ...(leveledUp ? { newLevel: level } : {}) });
   } catch (err) {
     console.error('POST /farm/harvest error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /farm/pest-defend — cancel pest before it destroys crop
+farmRouter.post('/pest-defend', async (req, res: Response): Promise<void> => {
+  const userId = (req as AuthRequest).userId;
+  const { plotId } = req.body ?? {};
+  if (!plotId) { res.status(400).json({ error: 'plotId required' }); return; }
+
+  try {
+    const plot = await prisma.plot.findFirst({ where: { id: plotId, userId } });
+    if (!plot) { res.status(404).json({ error: 'Plot not found' }); return; }
+    // If the plot still has a crop it means we defended in time (setTimeout hasn't fired)
+    res.json({ saved: plot.cropType !== null });
+  } catch (err) {
+    console.error('POST /farm/pest-defend error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });

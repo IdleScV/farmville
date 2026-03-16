@@ -1,0 +1,36 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id         String   @id @default(uuid())
+  username   String   @unique
+  password   String
+  level      Int      @default(1)
+  xp         Int      @default(0)
+  coins      Int      @default(150)
+  toolBelt   Json     @default("{\"water\":2,\"fertilizer\":2}")
+  lastLogin  DateTime?
+  createdAt  DateTime @default(now())
+  plots      Plot[]
+}
+
+model Plot {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  x           Int
+  y           Int
+  unlocked    Boolean   @default(false)
+  cropType    String?
+  plantedAt   DateTime?
+  harvestAt   DateTime?
+  fertBoosted Boolean   @default(false)
+
+  @@unique([userId, x, y])
+}

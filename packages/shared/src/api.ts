@@ -1,25 +1,39 @@
-import { User, Plot, FarmState } from './types';
+import { User, Plot, ToolBelt, CatchUpResult } from './types';
 
-// Auth
-export interface RegisterRequest { username: string; password: string; }
-export interface LoginRequest    { username: string; password: string; }
-export interface AuthResponse    { token: string; user: User; }
+export interface AuthResponse {
+  token: string;
+  user: User;
+}
 
-// Farm
-export interface PlantRequest   { plotId: string; cropTypeId: string; }
-export interface HarvestRequest { plotId: string; }
+export interface FarmResponse {
+  user: User;
+  plots: Plot[];
+  toolBelt: ToolBelt;
+  catchUp: CatchUpResult | null;
+}
+
+export interface PlantRequest {
+  plotId: string;
+  cropType: string;
+}
 
 export interface PlantResponse {
   plot: Plot;
-  coins: number;
+  user: User;
+  toolBelt: ToolBelt;
 }
 
 export interface HarvestResponse {
   plot: Plot;
-  coins: number;
-  xp: number;
+  user: User;
+  pestEvent: boolean;
   leveledUp: boolean;
   newLevel?: number;
+}
+
+export interface ToolResponse {
+  plot: Plot;
+  toolBelt: ToolBelt;
 }
 
 export interface ApiError { error: string; }
